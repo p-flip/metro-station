@@ -1,119 +1,290 @@
-/* ks0108.c
- * Low-Level-Treiber für KS0108 (128×64 Pixel)
- */
+/*
+ * ks0108.c
+ *
+ * KS0108 LCD-Controller Treiber fÃ¼r 128x64 Grafikdisplay
+ * Implementiert die Low-Level-Kommunikation mit dem Display
+ * 
+ * Created: 25.05.2025 14:11:18
+ *  Author: morri
+ */ 
+//#define F_CPU 3686400UL
 
+#include <avr/io.h>
+#include <util/delay.h>
 #include "ks0108.h"
 
+// Pin-Definitionen fÃ¼r KS0108 LCD-Controller
+// Diese Pins steuern die Kommunikation mit dem Display
+#define LCD_DDR   DDRC    // Data Direction Register fÃ¼r LCD-Pins
+#define LCD_PORT  PORTC   // Port Register fÃ¼r LCD-Pins
+#define LCD_PIN   PINC    // Pin Register fÃ¼r LCD-Pins (zum Lesen)
 
-/* Bus-Write: verteilt ein Byte auf PB0–PB1 und PD2–PD7 */
-static void write_bus(uint8_t v) {
-    PORTB = (PORTB & ~(_BV(DB0_PIN)|_BV(DB1_PIN)))
-          | ((v & 0x03) << DB0_PIN);
-    PORTD = (PORTD & ~(_BV(DB2_PIN)|_BV(DB3_PIN)|_BV(DB4_PIN)
-                     | _BV(DB5_PIN)|_BV(DB6_PIN)|_BV(DB7_PIN)))
-          | (v & 0xFC);
-}
+// LCD-Steuerpins (Chip Select fÃ¼r linke und rechte Display-HÃ¤lfte)
+#define LCD_CS1   PC0     // Chip Select 1 (linke HÃ¤lfte)
+#define LCD_CS2   PC1     // Chip Select 2 (rechte HÃ¤lfte)
 
-/* Erzeugt einen kurzen Enable-Impuls */
-static void pulse_enable(void) {
-	//SPI-Hardware abschalten, damit wir PB5 als GPIO nutzen können
-	SPCR &= ~(1 << SPE);
+// LCD-Datenpins (8-bit parallele DatenÃ¼bertragung)
+#define LCD_D0    PC2     // Datenbit 0
+#define LCD_D1    PC3     // Datenbit 1
+#define LCD_D2    PC4     // Datenbit 2
+#define LCD_D3    PC5     // Datenbit 3
+#define LCD_D4    PC6     // Datenbit 4
+#define LCD_D5    PC7     // Datenbit 5
+#define LCD_D6    PB0     // Datenbit 6
+#define LCD_D7    PB1     // Datenbit 7
+
+// LCD-Steuerpins
+#define LCD_RST   PB6     // Reset-Pin (Display zurÃ¼cksetzen)
+#define LCD_RW    PB7     // Read/Write-Pin (Lesen/Schreiben)
+#define LCD_DI    PD0     // Data/Instruction-Pin (Daten/Kommando)
+#define LCD_E     PD1     // Enable-Pin (Taktsignal)
+
+// Datenmasken fÃ¼r einfache Pin-Manipulation
+#define LCD_DATA_MASK_C   ((1 << LCD_D0) | (1 << LCD_D1) | (1 << LCD_D2) | (1 << LCD_D3) | (1 << LCD_D4) | (1 << LCD_D5))
+#define LCD_DATA_MASK_B   ((1 << LCD_D6) | (1 << LCD_D7))
+
+// LCD-Initialisierung
+// Konfiguriert alle Pins und initialisiert das Display
+void lcd_init(void) {
+	// Alle LCD-Pins als AusgÃ¤nge konfigurieren
+	LCD_DDR |= (1 << LCD_CS1) | (1 << LCD_CS2) | LCD_DATA_MASK_C;  // Port C Pins
+	DDRB |= LCD_DATA_MASK_B | (1 << LCD_RST) | (1 << LCD_RW);      // Port B Pins
+	DDRD |= (1 << LCD_DI) | (1 << LCD_E);                          // Port D Pins
 	
-    SET(PORTB, EN_PIN);	
-    _delay_us(1);
-    CLR(PORTB, EN_PIN);
-    _delay_us(1);
+	// Reset-Pin initial auf High setzen
+	PORTB |= (1 << LCD_RST);
 	
-	// SPI-Hardware wieder einschalten, damit künftige SPI-Transfers SCK treiben
-	SPCR |= (1 << SPE);
-}
-
-/* Initialisierung aller Pins und Aktivierung des Displays */
-void ks0108_init(void) {
-    /* Datenleitungen (DB0–DB7) als Ausgänge */
-    DDRB |= _BV(DB0_PIN) | _BV(DB1_PIN) | _BV(DC_PIN) | _BV(RW_PIN) | _BV(EN_PIN);
-    DDRD |= _BV(DB2_PIN) | _BV(DB3_PIN) | _BV(DB4_PIN)
-         | _BV(DB5_PIN) | _BV(DB6_PIN) | _BV(DB7_PIN);
-    /* Steuerleitungen (CS1, CS2, RST) als Ausgänge */
-    DDRC |= _BV(CS1_PIN) | _BV(CS2_PIN) | _BV(RST_PIN);
-
-    /* Hardware-Reset */
-    CLR(PORTC, RST_PIN);
-    _delay_ms(5);
-    SET(PORTC, RST_PIN);
-    _delay_ms(5);
-
-    /* RW immer Write, Chips zunächst deaktiviert */
-    CLR(PORTB, RW_PIN);
-    SET(PORTC, CS1_PIN);
-    SET(PORTC, CS2_PIN);
-    _delay_ms(5);
-
-    /* Display einschalten (0x3F = Display ON) */
-    ks0108_write_command(0, 0x3F);
-    ks0108_write_command(1, 0x3F);
-    _delay_ms(10);
-}
-
-/* Befehl schreiben (chip = 0 linke Hälfte, 1 rechte Hälfte) */
-void ks0108_write_command(uint8_t chip, uint8_t cmd) {
-	//Definieren als Output (immer low)	
-	PORTB  |=  (1 << RW_PIN);
-	CLR(PORTB, RW_PIN);
+	// Display zurÃ¼cksetzen (Reset-Pulse)
+	PORTB &= ~(1 << LCD_RST);  // Reset auf Low
+	_delay_ms(1);              // 1ms warten
+	PORTB |= (1 << LCD_RST);   // Reset auf High
+	_delay_ms(10);             // 10ms warten fÃ¼r Stabilisierung
 	
-    if (chip == 0) { CLR(PORTC, CS1_PIN); SET(PORTC, CS2_PIN); }
-    else           { SET(PORTC, CS1_PIN); CLR(PORTC, CS2_PIN); }
-    CLR(PORTB, DC_PIN);
-    write_bus(cmd);
-    pulse_enable();
-    SET(PORTC, CS1_PIN);
-    SET(PORTC, CS2_PIN);
-	//Definieren als Input für EEPROM
-	PORTB &= ~(1 << RW_PIN);
-}
-
-/* Databyte schreiben */
-void ks0108_write_data(uint8_t chip, uint8_t data) {
+	// Display-Konfiguration senden
+	lcd_write_cmd(0x3F);  // Display ON, Cursor OFF, Blink OFF
+	lcd_write_cmd(0x3F);  // Nochmal fÃ¼r Sicherheit
+	lcd_write_cmd(0x40);  // Set Display Start Line = 0
+	lcd_write_cmd(0xB8);  // Set Page Address = 0
+	lcd_write_cmd(0xC0);  // Set Column Address = 0
 	
-	//Definieren als Output (immer low)
-	PORTB  |=  (1 << RW_PIN);
-	CLR(PORTB, RW_PIN);
+	// Display lÃ¶schen
+	lcd_clear();
+}
+
+// LCD-Chip Select aktivieren
+// WÃ¤hlt die entsprechende Display-HÃ¤lfte aus
+void lcd_select_chip(uint8_t chip) {
+	if (chip == 0) {
+		// Linke HÃ¤lfte aktivieren
+		LCD_PORT &= ~(1 << LCD_CS1);  // CS1 auf Low
+		LCD_PORT |= (1 << LCD_CS2);   // CS2 auf High (inaktiv)
+	} else {
+		// Rechte HÃ¤lfte aktivieren
+		LCD_PORT |= (1 << LCD_CS1);   // CS1 auf High (inaktiv)
+		LCD_PORT &= ~(1 << LCD_CS2);  // CS2 auf Low
+	}
+}
+
+// LCD-Datenbus konfigurieren
+// Setzt die Datenpins auf die gewÃ¼nschten Werte
+void lcd_set_data(uint8_t data) {
+	// Port C Datenbits (D0-D5) setzen
+	LCD_PORT = (LCD_PORT & ~LCD_DATA_MASK_C) | (data & LCD_DATA_MASK_C);
 	
-    if (chip == 0) { CLR(PORTC, CS1_PIN); SET(PORTC, CS2_PIN); }
-    else           { SET(PORTC, CS1_PIN); CLR(PORTC, CS2_PIN); }
-    SET(PORTB, DC_PIN);
-    write_bus(data);
-    pulse_enable();
-    SET(PORTC, CS1_PIN);
-    SET(PORTC, CS2_PIN);
+	// Port B Datenbits (D6-D7) setzen
+	PORTB = (PORTB & ~LCD_DATA_MASK_B) | ((data >> 6) & LCD_DATA_MASK_B);
+}
+
+// LCD-Datenbus lesen
+// Liest die aktuellen Werte der Datenpins
+uint8_t lcd_get_data(void) {
+	uint8_t data = 0;
 	
-	//Definieren als Input für EEPROM
-	PORTB &= ~(1 << RW_PIN);
+	// Port C Datenbits (D0-D5) lesen
+	data = (LCD_PIN & LCD_DATA_MASK_C);
+	
+	// Port B Datenbits (D6-D7) lesen und kombinieren
+	data |= ((PINB & LCD_DATA_MASK_B) << 6);
+	
+	return data;
 }
 
-/* Setzt die aktive Seite (0–7) */
-void ks0108_set_page(uint8_t chip, uint8_t page) {
-    ks0108_write_command(chip, 0xB8 | (page & 0x07));
+// LCD-Kommando schreiben
+// Sendet ein Kommando an das Display
+void lcd_write_cmd(uint8_t cmd) {
+	// Beide Display-HÃ¤lften aktivieren (Kommando geht an beide)
+	LCD_PORT &= ~((1 << LCD_CS1) | (1 << LCD_CS2));
+	
+	// Datenbus als Ausgang konfigurieren
+	LCD_DDR |= LCD_DATA_MASK_C;
+	DDRB |= LCD_DATA_MASK_B;
+	
+	// R/W auf Low (Schreiben), DI auf Low (Kommando)
+	PORTB &= ~(1 << LCD_RW);
+	PORTD &= ~(1 << LCD_DI);
+	
+	// Daten auf Bus setzen
+	lcd_set_data(cmd);
+	
+	// Enable-Puls (E auf High, dann Low)
+	PORTD |= (1 << LCD_E);
+	_delay_us(1);  // 1Âµs warten
+	PORTD &= ~(1 << LCD_E);
+	
+	// Warten bis Display bereit ist
+	_delay_us(100);
 }
 
-/* Setzt die Spaltenadresse (0–63) */
-void ks0108_set_column(uint8_t chip, uint8_t column) {
-    ks0108_write_command(chip, 0x40 | (column & 0x3F));
+// LCD-Daten schreiben
+// Sendet Daten an das Display
+void lcd_write_data(uint8_t data) {
+	// Datenbus als Ausgang konfigurieren
+	LCD_DDR |= LCD_DATA_MASK_C;
+	DDRB |= LCD_DATA_MASK_B;
+	
+	// R/W auf Low (Schreiben), DI auf High (Daten)
+	PORTB &= ~(1 << LCD_RW);
+	PORTD |= (1 << LCD_DI);
+	
+	// Daten auf Bus setzen
+	lcd_set_data(data);
+	
+	// Enable-Puls (E auf High, dann Low)
+	PORTD |= (1 << LCD_E);
+	_delay_us(1);  // 1Âµs warten
+	PORTD &= ~(1 << LCD_E);
+	
+	// Warten bis Display bereit ist
+	_delay_us(100);
 }
 
-/* Schreibt einen 128-Byte-Puffer in beide Display-Hälften */
-void ks0108_write_page(uint8_t page, const uint8_t *buffer) {
+// LCD-Daten lesen
+// Liest Daten vom Display
+uint8_t lcd_read_data(void) {
+	uint8_t data;
+	
+	// Datenbus als Eingang konfigurieren
+	LCD_DDR &= ~LCD_DATA_MASK_C;
+	DDRB &= ~LCD_DATA_MASK_B;
+	
+	// R/W auf High (Lesen), DI auf High (Daten)
+	PORTB |= (1 << LCD_RW);
+	PORTD |= (1 << LCD_DI);
+	
+	// Enable-Puls (E auf High, dann Low)
+	PORTD |= (1 << LCD_E);
+	_delay_us(1);  // 1Âµs warten
+	PORTD &= ~(1 << LCD_E);
+	
+	// Daten vom Bus lesen
+	data = lcd_get_data();
+	
+	// Warten bis Display bereit ist
+	_delay_us(100);
+	
+	return data;
+}
+
+// LCD-Status lesen
+// PrÃ¼ft ob das Display bereit ist
+uint8_t lcd_read_status(void) {
+	uint8_t status;
+	
+	// Datenbus als Eingang konfigurieren
+	LCD_DDR &= ~LCD_DATA_MASK_C;
+	DDRB &= ~LCD_DATA_MASK_B;
+	
+	// R/W auf High (Lesen), DI auf Low (Status)
+	PORTB |= (1 << LCD_RW);
+	PORTD &= ~(1 << LCD_DI);
+	
+	// Enable-Puls (E auf High, dann Low)
+	PORTD |= (1 << LCD_E);
+	_delay_us(1);  // 1Âµs warten
+	PORTD &= ~(1 << LCD_E);
+	
+	// Status vom Bus lesen
+	status = lcd_get_data();
+	
+	// Warten bis Display bereit ist
+	_delay_us(100);
+	
+	return status;
+}
+
+// LCD warten bis bereit
+// Wartet bis das Display nicht mehr beschÃ¤ftigt ist
+void lcd_wait_ready(void) {
+	// Warten bis BUSY-Bit (Bit 7) nicht mehr gesetzt ist
+	while (lcd_read_status() & 0x80);
+}
+
+// LCD lÃ¶schen
+// LÃ¶scht das gesamte Display
+void lcd_clear(void) {
+	// Alle 8 Seiten durchgehen
+	for (uint8_t page = 0; page < 8; page++) {
+		// Seitenadresse setzen
+		lcd_write_cmd(0xB8 | page);
 		
-    /* Linke Hälfte */
-    ks0108_set_page(0, page);
-    ks0108_set_column(0, 0);
-    for (uint8_t c = 0; c < 64; c++) {
-        ks0108_write_data(0, buffer[c]);
-    }
-    /* Rechte Hälfte */
-    ks0108_set_page(1, page);
-    ks0108_set_column(1, 0);
-    for (uint8_t c = 0; c < 64; c++) {
-        ks0108_write_data(1, buffer[c + 64]);
-    }
+		// Spaltenadresse auf 0 setzen
+		lcd_write_cmd(0x40);
+		
+		// Alle 64 Spalten mit 0 fÃ¼llen
+		for (uint8_t col = 0; col < 64; col++) {
+			lcd_write_data(0x00);
+		}
+	}
+}
+
+// LCD-Pixel setzen
+// Setzt einen einzelnen Pixel auf Position (x,y)
+void lcd_set_pixel(uint8_t x, uint8_t y) {
+	uint8_t page = y / 8;      // Seite berechnen (8 Pixel pro Seite)
+	uint8_t bit = y % 8;       // Bit-Position in der Seite
+	uint8_t data;
+	
+	// Seitenadresse setzen
+	lcd_write_cmd(0xB8 | page);
+	
+	// Spaltenadresse setzen
+	lcd_write_cmd(0x40 | x);
+	
+	// Aktuelle Daten lesen
+	data = lcd_read_data();
+	
+	// Dummy-Read (Display gibt aktuelle Daten zurÃ¼ck)
+	lcd_read_data();
+	
+	// Bit setzen
+	data |= (1 << bit);
+	
+	// Neue Daten schreiben
+	lcd_write_data(data);
+}
+
+// LCD-Pixel lÃ¶schen
+// LÃ¶scht einen einzelnen Pixel auf Position (x,y)
+void lcd_clear_pixel(uint8_t x, uint8_t y) {
+	uint8_t page = y / 8;      // Seite berechnen (8 Pixel pro Seite)
+	uint8_t bit = y % 8;       // Bit-Position in der Seite
+	uint8_t data;
+	
+	// Seitenadresse setzen
+	lcd_write_cmd(0xB8 | page);
+	
+	// Spaltenadresse setzen
+	lcd_write_cmd(0x40 | x);
+	
+	// Aktuelle Daten lesen
+	data = lcd_read_data();
+	
+	// Dummy-Read (Display gibt aktuelle Daten zurÃ¼ck)
+	lcd_read_data();
+	
+	// Bit lÃ¶schen
+	data &= ~(1 << bit);
+	
+	// Neue Daten schreiben
+	lcd_write_data(data);
 }
