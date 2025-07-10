@@ -1,0 +1,69 @@
+# AVR Studio / Atmel Studio
+Debug/
+Release/
+*.o
+*.d
+*.elf
+*.hex
+*.eep
+*.lss
+*.map
+*.srec
+*.obj
+*.lst
+*.bak
+*.tmp
+*.log
+makedep.mk
+Makefile
+
+# Arduino IDE
+*.ino.bak
+*.ino.elf
+*.ino.hex
+*.ino.eep
+*.ino.map
+*.ino.lss
+*.ino.srec
+
+# Build-Verzeichnisse
+build/
+bin/
+obj/
+
+# IDE-spezifische Dateien
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Betriebssystem-Dateien
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Temporäre Dateien
+*.tmp
+*.temp
+*.log
+
+# Backup-Dateien
+*.bak
+*.backup
+*~
+
+# Kompilierte Dateien
+*.exe
+*.dll
+*.so
+*.dylib
+
+# Dokumentation (optional - kann auch eingeschlossen werden)
+# docs/
+# README.md (sollte eingeschlossen werden)
+
+# Konfigurationsdateien mit sensiblen Daten
+config.h
+secrets.h
+wifi_config.h 
